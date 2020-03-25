@@ -3,6 +3,9 @@ BEAT_TITLE?=Filebeat
 SYSTEM_TESTS?=true
 TEST_ENVIRONMENT?=true
 GOX_FLAGS=-arch="amd64 386 arm ppc64 ppc64le"
+NOW=$(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+COMMIT_ID=$(shell git rev-parse HEAD)
+GOX_FLAGS=-arch="amd64" -ldflags "-X github.com/elastic/beats/libbeat/version.buildTime=$(NOW) -X github.com/elastic/beats/libbeat/version.commit=$(COMMIT_ID)"
 ES_BEATS?=..
 EXCLUDE_COMMON_UPDATE_TARGET=true
 
