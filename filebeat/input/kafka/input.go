@@ -109,8 +109,10 @@ func (input *kafkaInput) runConsumerGroup(
 		version: input.config.Version,
 		outlet:  input.outlet,
 		// expandEventListFromField will be assigned the configuration option expand_event_list_from_field
-		expandEventListFromField: input.config.ExpandEventListFromField,
-		log:                      input.log,
+		log: input.log,
+	}
+	if input.config.ExpandEventListFromField != "" {
+		handler.expandEventListFromField = strings.Split(input.config.ExpandEventListFromField, ",")
 	}
 
 	input.saramaWaitGroup.Add(1)
@@ -240,7 +242,7 @@ type groupHandler struct {
 	outlet  channel.Outleter
 	// if the fileset using this input expects to receive multiple messages bundled under a specific field then this value is assigned
 	// ex. in this case are the azure fielsets where the events are found under the json object "records"
-	expandEventListFromField string
+	expandEventListFromField []string
 	log                      *logp.Logger
 }
 
@@ -266,7 +268,7 @@ func (h *groupHandler) createEvents(
 
 	version, versionOk := h.version.Get()
 	if versionOk && version.IsAtLeast(sarama.V0_10_0_0) {
-		timestamp = message.Timestamp
+		// timestamp = message.Timestamp
 		if !message.BlockTimestamp.IsZero() {
 			kafkaFields["block_timestamp"] = message.BlockTimestamp
 		}
@@ -276,28 +278,56 @@ func (h *groupHandler) createEvents(
 	}
 
 	// if expandEventListFromField has been set, then a check for the actual json object will be done and a return for multiple messages is executed
-	var events []beat.Event
-	var messages []string
-	if h.expandEventListFromField == "" {
-		messages = []string{string(message.Value)}
+	var events []beat.Event = make([]beat.Event, 0, len(h.expandEventListFromField)+1)
+	var messages map[string]string
+	if len(h.expandEventListFromField) == 0 {
+		messages = map[string]string{"message": string(message.Value)}
 	} else {
 		messages = h.parseMultipleMessages(message.Value)
 	}
-	for _, msg := range messages {
-		event := beat.Event{
-			Timestamp: timestamp,
-			Fields: common.MapStr{
-				"message": msg,
-				"kafka":   kafkaFields,
-			},
-			Private: eventMeta{
-				handler: h,
-				message: message,
-			},
-		}
-		events = append(events, event)
-
+	event := beat.Event{
+		Timestamp: timestamp,
+		Fields: common.MapStr{
+			"message": messages["message"],
+			"kafka":   kafkaFields,
+		},
+		Private: eventMeta{
+			handler: h,
+			message: message,
+		},
 	}
+
+	for _, mark := range h.expandEventListFromField {
+		if _, ok := messages[mark]; ok {
+			event.Fields["fields."+mark] = strings.Trim(messages[mark], "\"")
+		}
+	}
+
+	events = append(events, event)
+
+	// var events []beat.Event
+	// var messages []string
+	// if h.expandEventListFromField == "" {
+	// 	messages = []string{string(message.Value)}
+	// } else {
+	// 	messages = h.parseMultipleMessages(message.Value)
+	// }
+	// for _, msg := range messages {
+	// 	event := beat.Event{
+	// 		Timestamp: timestamp,
+	// 		Fields: common.MapStr{
+	// 			"message": msg,
+	// 			"kafka":   kafkaFields,
+	// 		},
+	// 		Private: eventMeta{
+	// 			handler: h,
+	// 			message: message,
+	// 		},
+	// 	}
+	// 	events = append(events, event)
+
+	// }
+
 	return events
 }
 
@@ -336,19 +366,20 @@ func (h *groupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sara
 }
 
 // parseMultipleMessages will try to split the message into multiple ones based on the group field provided by the configuration
-func (h *groupHandler) parseMultipleMessages(bMessage []byte) []string {
-	var obj map[string][]interface{}
+func (h *groupHandler) parseMultipleMessages(bMessage []byte) map[string]string {
+	var obj map[string]interface{}
 	err := json.Unmarshal(bMessage, &obj)
 	if err != nil {
-		h.log.Errorw(fmt.Sprintf("Kafka desirializing multiple messages using the group object %s", h.expandEventListFromField), "error", err)
-		return []string{}
+		h.log.Errorw(fmt.Sprintf("Kafka desirializing multiple messages using the group object %s", strings.Join(h.expandEventListFromField, ",")), "error", err)
+		return map[string]string{}
 	}
-	var messages []string
-	if len(obj[h.expandEventListFromField]) > 0 {
-		for _, ms := range obj[h.expandEventListFromField] {
+	messages := make(map[string]string, len(h.expandEventListFromField)+1)
+	messages["message"] = string(bMessage)
+	for _, mark := range h.expandEventListFromField {
+		if ms, ok := obj[mark]; ok {
 			js, err := json.Marshal(ms)
 			if err == nil {
-				messages = append(messages, string(js))
+				messages[mark] = string(js)
 			} else {
 				h.log.Errorw(fmt.Sprintf("Kafka serializing message %s", ms), "error", err)
 			}
